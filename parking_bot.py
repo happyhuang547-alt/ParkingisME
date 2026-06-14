@@ -22,7 +22,7 @@ Colab 執行（建議）:
     # 可先設定環境變數避免互動輸入
     # %env PARKING_USERNAME=你的員工編號
     # %env PARKING_PASSWORD=你的密碼
-    # %env PARKING_DATE=2026/06/05
+    # %env PARKING_DATE=2026/06/15
     !python parking_bot.py --colab --headless
 """
 
@@ -62,7 +62,7 @@ CONFIG = {
     "reason":     "申請臨停",        # 申請事由
     "parking_lot": "LF-B3",         # 停車場代碼
     "time_slot":   "早上 08:00~20:00",  # 時段顯示文字
-    "parking_dates": [],  # 申請停車日期列表，格式 YYYY/MM/DD；空列表 = 今天
+    "parking_dates": ["2026/06/15","2026/06/16","2026/06/17","2026/06/18"],  # 申請停車日期列表，格式 YYYY/MM/DD；空列表 = 今天
 
     # ── 搶位行為 ──────────────────────────────────────────────
     # 每次「檢查車位」之間的等待時間（秒）；調低可加快速度，但太低可能被伺服器擋
@@ -557,6 +557,7 @@ async def step_fill_form(page: Page, parking_date: str = "", debug: bool = False
             or datetime.now().strftime("%Y/%m/%d")
         )
     date_input_value = parking_date.replace("/", "-")  # input[type=date] 需要 YYYY-MM-DD
+    await safe_fill(page, SEL["input_date"], date_input_value, "申請日期", timeout=30_000)
     log(f"申請停車日期: {parking_date}")
 
     # ── 點「選擇時段」開啟 Modal ──
