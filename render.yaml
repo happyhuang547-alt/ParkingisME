@@ -1,4 +1,28 @@
 services:
+  # ── LINE Bot Web Server（手機觸發介面）─────────────────────
+  - type: web
+    name: parking-bot-line
+    env: python
+    plan: starter
+    buildCommand: |
+      pip install -r requirements.txt
+      python -m playwright install --with-deps chromium
+    startCommand: python line_bot_server.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: PARKING_USERNAME
+        sync: false
+      - key: PARKING_PASSWORD
+        sync: false
+      - key: TZ
+        value: Asia/Taipei
+
+  # ── 排程自動搶位（每週一到五 07:50 自動執行）────────────────
   - type: cron
     name: parking-bot-cron
     env: python
