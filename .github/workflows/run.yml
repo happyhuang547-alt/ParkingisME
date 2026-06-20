@@ -24,5 +24,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Python
+        env:
+          PARKING_USERNAME: ${{ secrets.PARKING_USERNAME }}
+          PARKING_PASSWORD: ${{ secrets.PARKING_PASSWORD }}
         run: |
           python parking_bot.py --headless
