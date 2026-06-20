@@ -23,6 +23,10 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      - name: Install Playwright Browsers
+        run: |
+          python -m playwright install --with-deps chromium
+
       - name: Run Python
         run: |
           python parking_bot.py --headless
