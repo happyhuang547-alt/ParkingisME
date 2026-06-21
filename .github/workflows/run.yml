@@ -1,4 +1,4 @@
-name: Run Python Job
+name: Get Parking Space
 
 on:
   schedule:
