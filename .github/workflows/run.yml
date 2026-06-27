@@ -1,13 +1,15 @@
-name: Get Parking Space
+name: Parking Bot
 
 on:
   schedule:
-    - cron: "0 22 * * *"
+    # 每天 6:30 AM（台灣時間 UTC+8 → 22:30 UTC）
+    # 週一~週五發車：0-4 = 週日~週四 UTC
+    - cron: "30 22 * * 0-4"
 
   workflow_dispatch:
 
 jobs:
-  run-python:
+  hunt:
     runs-on: ubuntu-latest
 
     steps:
@@ -25,11 +27,14 @@ jobs:
 
       - name: Install Playwright Browsers
         run: |
-          python -m playwright install --with-deps
+          python -m playwright install --with-deps chromium
 
-      - name: Run Python
+      - name: Run Parking Bot
         env:
           PARKING_USERNAME: ${{ secrets.PARKING_USERNAME }}
           PARKING_PASSWORD: ${{ secrets.PARKING_PASSWORD }}
+          PARKING_DATES: ${{ vars.PARKING_DATES }}
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
         run: |
-          python parking_bot.py --headless
+          python parking_bot.py --headless --non-interactive
