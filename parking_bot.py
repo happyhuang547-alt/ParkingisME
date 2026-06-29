@@ -50,7 +50,7 @@ CONFIG = {
     "base_url": "https://parking.shl-external.com/",
 
     # ── 申請資料 ──────────────────────────────────────────────
-    "car_number": "BPP-9715",       # 車號（下拉選單顯示文字）
+    "car_number": "BGK-6970",       # 車號（下拉選單顯示文字）
     "reason":     "申請臨停",        # 申請事由
     "parking_lot": "LF-B3",         # 停車場代碼
     "time_slot":   "早上 08:00~20:00",  # 時段顯示文字
