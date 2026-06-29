@@ -1,0 +1,40 @@
+name: Parking Bot
+
+on:
+  schedule:
+    # 每天 6:30 AM（台灣時間 UTC+8 → 22:30 UTC）
+    # 週一~週五發車：0-4 = 週日~週四 UTC
+    - cron: "30 22 * * 0-4"
+
+  workflow_dispatch:
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Install Playwright Browsers
+        run: |
+          python -m playwright install --with-deps chromium
+
+      - name: Run Parking Bot
+        env:
+          PARKING_USERNAME: ${{ secrets.PARKING_USERNAME }}
+          PARKING_PASSWORD: ${{ secrets.PARKING_PASSWORD }}
+          PARKING_DATES: ${{ vars.PARKING_DATES }}
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+        run: |
+          python parking_bot.py --headless --non-interactive

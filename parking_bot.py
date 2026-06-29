@@ -15,15 +15,6 @@
     python parking_bot.py
     python parking_bot.py --debug          # 除錯模式（會在關鍵步驟暫停）
     python parking_bot.py --headless       # 無頭模式（背景執行）
-
-Colab 執行（建議）:
-    !pip install -r requirements.txt
-    !playwright install --with-deps chromium
-    # 可先設定環境變數避免互動輸入
-    # %env PARKING_USERNAME=你的員工編號
-    # %env PARKING_PASSWORD=你的密碼
-    # %env PARKING_DATE=2026/06/15
-    !python parking_bot.py --colab --headless
 """
 
 import asyncio
@@ -31,6 +22,7 @@ import sys
 import argparse
 import os
 import getpass
+import re
 from datetime import datetime
 from playwright.async_api import (
     async_playwright,
@@ -62,7 +54,7 @@ CONFIG = {
     "reason":     "申請臨停",        # 申請事由
     "parking_lot": "LF-B3",         # 停車場代碼
     "time_slot":   "早上 08:00~20:00",  # 時段顯示文字
-    "parking_dates": ["2026/06/18"],  # 申請停車日期列表，格式 YYYY/MM/DD；空列表 = 今天
+    "parking_dates": ["2026/07/01","2026/07/02"],  # 申請停車日期列表，格式 YYYY/MM/DD；空列表 = 今天
 
     # ── 搶位行為 ──────────────────────────────────────────────
     # 每次「檢查車位」之間的等待時間（秒）；調低可加快速度，但太低可能被伺服器擋
@@ -72,7 +64,7 @@ CONFIG = {
     "max_check_attempts": 999,
 
     # 發現有車位後，等待頁面反應的超時（秒）
-    "apply_wait_sec": 10,
+    "apply_wait_sec": 20,
 
     # 網路請求超時（毫秒）
     "network_timeout_ms": 20_000,
@@ -85,9 +77,6 @@ CONFIG = {
 
     # 瀏覽器是否顯示視窗（False = headless 背景；True = 顯示）
     "headless": False,
-
-    # 是否在 Colab 執行（自動偵測，可用 --colab 強制開啟）
-    "colab_mode": False,
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -172,7 +161,7 @@ SEL = {
     "btn_apply":            "button:has-text('送出申請')",
 
     # 成功訊息（可選）—— 用來確認申請成功
-    "success_msg":          "text=申請成功, text=成功, .swal2-title:has-text('成功')",
+    "success_msg":          ".swal2-popup",
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -195,28 +184,17 @@ def log(msg: str, level: str = "INFO") -> None:
     print(f"[{now}] {icon}  {msg}", flush=True)
 
 
-def is_colab_runtime() -> bool:
-    """判斷是否在 Google Colab 環境執行。"""
-    if "COLAB_RELEASE_TAG" in os.environ:
-        return True
-    if "google.colab" in sys.modules:
-        return True
-    try:
-        import google.colab  # type: ignore  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
 def resolve_parking_dates() -> list[str]:
-    """解析停車日期，優先使用環境變數 PARKING_DATE。"""
-    env_parking_date = os.environ.get("PARKING_DATE", "").strip()
-    if env_parking_date:
-        # 支援單日或多日，例如: 2026/06/08,2026-06-09
-        raw_dates = [d.strip() for d in env_parking_date.replace(";", ",").split(",") if d.strip()]
+    """解析停車日期，優先使用環境變數 PARKING_DATES（或 PARKING_DATE）。"""
+    # 先讀 PARKING_DATES，再 fallback 到 PARKING_DATE
+    env_val = os.environ.get("PARKING_DATES") or os.environ.get("PARKING_DATE") or ""
+    env_val = env_val.strip()
+    if env_val:
+        raw_dates = [d.strip() for d in env_val.replace(";", ",").split(",") if d.strip()]
         normalized_dates = [d.replace("-", "/") for d in raw_dates]
         if normalized_dates:
-            log(f"從環境變數 PARKING_DATE 讀取日期: {', '.join(normalized_dates)}", "DEBUG")
+            src = "PARKING_DATES" if "PARKING_DATES" in os.environ else "PARKING_DATE"
+            log(f"從環境變數 {src} 讀取日期: {', '.join(normalized_dates)}", "DEBUG")
             return normalized_dates
 
     parking_dates = CONFIG.get("parking_dates", [])
@@ -299,11 +277,14 @@ async def safe_fill(page: Page, selector: str, value: str,
     raise PlaywrightTimeoutError(f"無法填入『{desc}』: {last_error}")
 
 
+_debug_semaphore = asyncio.Semaphore(1)
+
 async def debug_pause(page: Page, msg: str, debug: bool) -> None:
     """除錯模式下暫停，讓你在瀏覽器 DevTools 檢查 DOM"""
     if debug:
-        log(f"[DEBUG] {msg} — 按 Enter 繼續...", "DEBUG")
-        await asyncio.get_event_loop().run_in_executor(None, input)
+        async with _debug_semaphore:
+            log(f"[DEBUG] {msg} — 按 Enter 繼續...", "DEBUG")
+            await asyncio.get_event_loop().run_in_executor(None, input)
 
 
 def ask_credentials(non_interactive: bool = False) -> None:
@@ -335,23 +316,11 @@ def ask_credentials(non_interactive: bool = False) -> None:
         CONFIG["password"] = password
         return
 
-    # Colab / headless 環境直接使用 CLI 輸入，避免 tkinter 失敗
-    if CONFIG["colab_mode"]:
-        if not username:
-            username = input("請輸入員工編號: ").strip()
-        if not password:
-            password = getpass.getpass("請輸入密碼: ")
-
-        if not username:
-            print("未輸入員工編號，程式結束。")
-            sys.exit(0)
-
-        CONFIG["username"] = username
-        CONFIG["password"] = password
-        return
-
     # tkinter 不可用時，直接改用 CLI 輸入
     if tk is None or messagebox is None:
+        if not sys.stdin.isatty():
+            log("無可用終端機且缺少環境變數憑證，無法繼續", "ERROR")
+            sys.exit(2)
         username = username or input("請輸入員工編號: ").strip()
         if not username:
             print("未輸入員工編號，程式結束。")
@@ -421,8 +390,10 @@ def ask_credentials(non_interactive: bool = False) -> None:
         CONFIG["password"] = password_var.get()
         
     except Exception as e:
-        # 🔴 [修復] 如果 GUI 初始化失敗（例如無 X11），改用控制台輸入
         log(f"GUI 初始化失敗 ({e})，改用控制台輸入", "WARN")
+        if not sys.stdin.isatty():
+            log("無可用終端機且缺少環境變數憑證，無法繼續", "ERROR")
+            sys.exit(2)
         username = username or input("請輸入員工編號: ").strip()
         if not username:
             print("未輸入員工編號，程式結束。")
@@ -553,9 +524,8 @@ async def step_fill_form(page: Page, parking_date: str = "", debug: bool = False
 
     if not parking_date:
         parking_date = (
-            os.environ.get("PARKING_DATE", "").strip()
-            or datetime.now().strftime("%Y/%m/%d")
-        )
+            os.environ.get("PARKING_DATES") or os.environ.get("PARKING_DATE") or ""
+        ).strip() or datetime.now().strftime("%Y/%m/%d")
     date_input_value = parking_date.replace("/", "-")  # input[type=date] 需要 YYYY-MM-DD
     await safe_fill(page, SEL["input_date"], date_input_value, "申請日期", timeout=30_000)
     log(f"申請停車日期: {parking_date}")
@@ -727,7 +697,7 @@ async def step_fill_form(page: Page, parking_date: str = "", debug: bool = False
     log("表單填寫完成，準備搶位", "SUCCESS")
 
 
-async def step_hunt_parking(page: Page, debug: bool = False) -> bool:
+async def step_hunt_parking(page: Page, debug: bool = False) -> tuple[bool, str]:
     """
     步驟 4：搶位核心迴圈
     ────────────────────
@@ -738,8 +708,8 @@ async def step_hunt_parking(page: Page, debug: bool = False) -> bool:
       • 若含「無車位」→ 等待 check_interval_sec 再試
 
     返回:
-      True  = 已成功送出申請
-      False = 達到最大次數仍失敗
+      (True, 車位編號)  已成功送出申請
+      (False, "")       達到最大次數仍失敗
     """
     log("═══ 步驟 4：開始搶位迴圈 ═══", "HUNT")
     max_tries = CONFIG["max_check_attempts"]
@@ -787,16 +757,21 @@ async def step_hunt_parking(page: Page, debug: bool = False) -> bool:
             await asyncio.sleep(1)
 
     log(f"已達最大嘗試次數 {max_tries}，搶位失敗", "ERROR")
-    return False
+    return False, ""
 
 
-async def _do_apply(page: Page) -> bool:
-    """點擊「申請」按鈕並等待確認結果（內部函式）"""
+async def _do_apply(page: Page) -> tuple[bool, str]:
+    """點擊「申請」按鈕並等待確認結果（內部函式）
+    
+    返回:
+      (True, 車位編號)  成功申請並取得車位編號
+      (False, "")       失敗
+    """
     try:
         apply_btn = page.locator(SEL["btn_apply"])
         if await apply_btn.count() == 0:
             log("找不到「申請」按鈕", "WARN")
-            return False
+            return False, ""
 
         if not await apply_btn.is_enabled():
             log("「申請」按鈕已停用，等待 1 秒後重試...", "WARN")
@@ -805,179 +780,230 @@ async def _do_apply(page: Page) -> bool:
         await apply_btn.click()
         log("已按下「申請」，等待確認回應...", "SUCCESS")
 
-        # 等待成功訊息（如頁面有 SweetAlert2 等彈窗）
+        # 等待真正有文字的 SweetAlert2 成功彈窗（而非殘留 DOM）
+        slot_id = ""
         try:
-            await page.wait_for_selector(
-                SEL["success_msg"],
+            await page.wait_for_function(
+                """() => {
+                    const popup = document.querySelector('.swal2-popup');
+                    if (!popup) return false;
+                    if (popup.style.display === 'none' || popup.style.visibility === 'hidden') return false;
+                    const text = popup.textContent || '';
+                    return text.includes('成功') || text.includes('車位') || text.length > 10;
+                }""",
                 timeout=CONFIG["apply_wait_sec"] * 1_000,
             )
             log("🎉  收到成功確認訊息！申請完成！", "SUCCESS")
+
+            # 記錄彈窗文字供除錯
+            try:
+                popup_text = (await page.locator(".swal2-popup").first.inner_text()).strip()
+                log(f"彈窗: {popup_text[:200]}", "INFO")
+            except Exception:
+                pass
+
+            # 關閉 SweetAlert2 toast（按 Ok / 確定）
+            try:
+                confirm_btn = page.locator(".swal2-confirm")
+                if await confirm_btn.count() > 0:
+                    await confirm_btn.first.click()
+                    await asyncio.sleep(1.5)
+            except Exception:
+                pass
+
+            # 等頁面穩定（可能跳轉到確認頁）
+            await page.wait_for_load_state("networkidle", timeout=15_000)
+
         except PlaywrightTimeoutError:
-            # 沒有成功彈窗也不代表失敗，可能頁面直接跳轉
             log("未偵測到成功彈窗，請手動確認瀏覽器畫面", "WARN")
 
-        return True
+        # 從頁面抓車位編號（送出後跳轉到「車位申請記錄」頁）
+        # 車位編號在勾選圖示 <i class="fa fa-check"> 後的文字
+        for xpath in [
+            # 限縮到 history_table 內，取最新那筆（first row）
+            "(//table[contains(@class,'history_table')]//i[contains(@class,'fa-check')]/parent::div)[1]",
+        ]:
+            try:
+                slot_el = page.locator(f"xpath={xpath}")
+                if await slot_el.count() > 0:
+                    raw = (await slot_el.first.inner_text()).strip()
+                    log(f"原始文字: {raw!r}", "INFO")
+                    m = re.search(r'([A-Z]+\d+)', raw)
+                    slot_id = m.group(1) if m else raw
+                    log(f"車位編號: {slot_id}", "SUCCESS")
+                    break
+            except Exception:
+                continue
+
+        return True, slot_id
 
     except Exception as e:
         log(f"申請過程發生錯誤: {e}", "ERROR")
-        return False
+        return False, ""
 
 
 # ═══════════════════════════════════════════════════════════════
-#  ⑤ 主程式 — 含崩潰自動重啟機制
+#  ⑤ 主程式 — 並行搶位
 # ═══════════════════════════════════════════════════════════════
+
+async def _hunt_single_date(
+    pw: async_playwright,
+    target_date: str,
+    dates_lock: asyncio.Lock,
+    completed_dates: list[str],
+    debug: bool,
+    headless: bool,
+) -> bool:
+    """為單一日期搶車位。每個 task 有自己的瀏覽器，成功返回 True。"""
+    crash_count = 0
+    max_crash = CONFIG["max_crash_retries"]
+
+    while crash_count <= max_crash:
+        browser: Browser = None
+        try:
+            log(f"[{target_date}] 啟動 Chromium（第 {crash_count + 1} 次）...")
+            launch_args = [
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ]
+
+            browser = await pw.chromium.launch(
+                headless=headless,
+                args=launch_args,
+            )
+
+            page: Page = await browser.new_page(
+                viewport={"width": 1366, "height": 768},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            )
+
+            async def mask_request_headers(route) -> None:
+                headers = dict(route.request.headers)
+                headers["sec-ch-ua"] = '"Not/A)Brand";v="99", "Chromium";v="148"'
+                headers["sec-ch-ua-mobile"] = "?0"
+                headers["sec-ch-ua-platform"] = '"Windows"'
+                headers["accept-language"] = "zh-TW"
+                await route.continue_(headers=headers)
+
+            await page.route("**/*", mask_request_headers)
+
+            await page.add_init_script(
+                """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(window, 'chrome', {
+                    value: { runtime: {} },
+                    configurable: true,
+                    writable: true,
+                });
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['zh-TW', 'zh', 'en-US'],
+                });
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [
+                        {
+                            0: {type: 'application/x-google-chrome-pdf', suffix: 'pdf', description: 'Portable Document Format'},
+                            name: 'Chrome PDF Plugin',
+                            filename: 'internal-pdf-viewer',
+                            description: 'Portable Document Format',
+                            length: 1,
+                        },
+                    ],
+                });
+                Object.defineProperty(navigator, 'hardwareConcurrency', {
+                    get: () => 8,
+                });
+                Object.defineProperty(navigator, 'deviceMemory', {
+                    get: () => 8,
+                });
+                """
+            )
+            page.set_default_timeout(CONFIG["network_timeout_ms"])
+
+            await step_login(page, debug)
+            await step_navigate_to_temp_parking(page, debug)
+            await step_fill_form(page, target_date, debug)
+            success, slot_id = await step_hunt_parking(page, debug)
+
+            if success:
+                async with dates_lock:
+                    completed_dates.append(target_date)
+                log(f"[{target_date}] 🎉 搶位成功！ 車位: {slot_id or '未知'}", "SUCCESS")
+                if slot_id:
+                    try:
+                        import gcal
+                        gcal.add_parking_event(
+                            target_date, slot_id,
+                            CONFIG["parking_lot"], CONFIG["time_slot"],
+                        )
+                    except Exception as e:
+                        log(f"[{target_date}] Google Calendar 寫入失敗: {e}", "WARN")
+                return True
+            else:
+                log(f"[{target_date}] 搶位失敗（未搶到或已達上限）", "WARN")
+                return False
+
+        except PlaywrightTimeoutError as e:
+            crash_count += 1
+            log(f"[{target_date}] 網路逾時（第 {crash_count}/{max_crash} 次）: {e}", "ERROR")
+            if crash_count <= max_crash:
+                log(f"[{target_date}] {CONFIG['crash_wait_sec']} 秒後重新啟動...", "RETRY")
+                await asyncio.sleep(CONFIG["crash_wait_sec"])
+
+        except KeyboardInterrupt:
+            log("使用者中止程式", "WARN")
+            return False
+
+        except Exception as e:
+            crash_count += 1
+            log(f"[{target_date}] 程式異常崩潰（第 {crash_count}/{max_crash} 次）: {type(e).__name__}: {e}", "ERROR")
+            if crash_count <= max_crash:
+                log(f"[{target_date}] {CONFIG['crash_wait_sec']} 秒後重新啟動...", "RETRY")
+                await asyncio.sleep(CONFIG["crash_wait_sec"])
+
+        finally:
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+
+    log(f"[{target_date}] 已達最大崩潰重啟次數（{max_crash}），放棄", "ERROR")
+    return False
+
 
 async def run_bot(debug: bool = False, headless_override: bool = None) -> None:
     """
     主控流程：
-    1. 登入
-    2. 導覽至臨時車位申請
-    3. 填寫表單
-    4. 搶位迴圈
-    若任一步驟崩潰/網路逾時，自動重啟最多 max_crash_retries 次
+    為每個日期建立獨立 task 並行搶位，每個 task 有自己的瀏覽器。
     """
     headless = headless_override if headless_override is not None else CONFIG["headless"]
-    colab_mode = CONFIG["colab_mode"]
     
-    # 準備日期列表（環境變數 PARKING_DATE 優先）
     parking_dates = resolve_parking_dates()
-    
     log(f"準備搶位 {len(parking_dates)} 個日期: {', '.join(parking_dates)}", "INFO")
     
-    completed_dates = []
+    if not parking_dates:
+        log("沒有需要搶位的日期", "WARN")
+        return
     
+    completed_dates: list[str] = []
+    dates_lock = asyncio.Lock()
+
     async with async_playwright() as pw:
-        for date_idx, target_date in enumerate(parking_dates, 1):
-            log(f"================================", "INFO")
-            log(f"第 {date_idx}/{len(parking_dates)} 個日期: {target_date}", "HUNT")
-            log(f"================================", "INFO")
+        tasks = [
+            _hunt_single_date(pw, d, dates_lock, completed_dates, debug, headless)
+            for d in list(parking_dates)
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            crash_count = 0
-            max_crash = CONFIG["max_crash_retries"]
-
-            while crash_count <= max_crash:
-                browser: Browser = None
-                try:
-                    log(f"啟動 Chromium（第 {crash_count + 1} 次）...")
-                    launch_args = [
-                        # 避免部分網站偵測到 Playwright 自動化旗標
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                    ]
-                    if colab_mode:
-                        # Colab 容器常見穩定性參數
-                        launch_args.extend([
-                            "--disable-gpu",
-                            "--no-zygote",
-                            "--single-process",
-                        ])
-
-                    browser = await pw.chromium.launch(
-                        headless=headless,
-                        args=launch_args,
-                    )
-
-                    # 建立新頁面，偽裝成一般 Chrome
-                    page: Page = await browser.new_page(
-                        viewport={"width": 1366, "height": 768},
-                        user_agent=(
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/124.0.0.0 Safari/537.36"
-                        ),
-                    )
-
-                    async def mask_request_headers(route) -> None:
-                        headers = dict(route.request.headers)
-                        headers["sec-ch-ua"] = '"Not/A)Brand";v="99", "Chromium";v="148"'
-                        headers["sec-ch-ua-mobile"] = "?0"
-                        headers["sec-ch-ua-platform"] = '"Linux"' if colab_mode else '"Windows"'
-                        headers["accept-language"] = "zh-TW"
-                        await route.continue_(headers=headers)
-
-                    await page.route("**/*", mask_request_headers)
-
-                    await page.add_init_script(
-                        """
-                        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                        Object.defineProperty(window, 'chrome', {
-                            value: { runtime: {} },
-                            configurable: true,
-                            writable: true,
-                        });
-                        Object.defineProperty(navigator, 'languages', {
-                            get: () => ['zh-TW', 'zh', 'en-US'],
-                        });
-                        Object.defineProperty(navigator, 'plugins', {
-                            get: () => [
-                                {
-                                    0: {type: 'application/x-google-chrome-pdf', suffix: 'pdf', description: 'Portable Document Format'},
-                                    name: 'Chrome PDF Plugin',
-                                    filename: 'internal-pdf-viewer',
-                                    description: 'Portable Document Format',
-                                    length: 1,
-                                },
-                            ],
-                        });
-                        Object.defineProperty(navigator, 'hardwareConcurrency', {
-                            get: () => 8,
-                        });
-                        Object.defineProperty(navigator, 'deviceMemory', {
-                            get: () => 8,
-                        });
-                        """
-                    )
-                    # 設定全域預設逾時
-                    page.set_default_timeout(CONFIG["network_timeout_ms"])
-
-                    # ── 執行各步驟 ──
-                    await step_login(page, debug)
-                    await step_navigate_to_temp_parking(page, debug)
-                    await step_fill_form(page, target_date, debug)
-                    success = await step_hunt_parking(page, debug)
-
-                    if success:
-                        log("=" * 55, "SUCCESS")
-                        log(f"  🎉  日期 {target_date} 搶位成功！", "SUCCESS")
-                        log("=" * 55, "SUCCESS")
-                        completed_dates.append(target_date)
-                    else:
-                        log("搶位結束（未搶到或已達上限）", "WARN")
-
-                    break  # 正常結束，跳出重啟迴圈進入下一日期
-
-                except PlaywrightTimeoutError as e:
-                    crash_count += 1
-                    log(f"網路逾時（第 {crash_count}/{max_crash} 次）: {e}", "ERROR")
-                    if crash_count <= max_crash:
-                        log(f"{CONFIG['crash_wait_sec']} 秒後重新啟動...", "RETRY")
-                        await asyncio.sleep(CONFIG["crash_wait_sec"])
-
-                except KeyboardInterrupt:
-                    log("使用者中止程式", "WARN")
-                    return
-
-                except Exception as e:
-                    crash_count += 1
-                    log(f"程式異常崩潰（第 {crash_count}/{max_crash} 次）: {type(e).__name__}: {e}", "ERROR")
-                    if crash_count <= max_crash:
-                        log(f"{CONFIG['crash_wait_sec']} 秒後重新啟動...", "RETRY")
-                        await asyncio.sleep(CONFIG["crash_wait_sec"])
-
-                finally:
-                    if browser:
-                        try:
-                            await browser.close()
-                        except Exception:
-                            pass  # 瀏覽器已崩潰，忽略關閉錯誤
-
-            if crash_count > max_crash:
-                log(f"日期 {target_date} 已達最大崩潰重啟次數（{max_crash}），跳過此日期", "ERROR")
+    success_count = sum(1 for r in results if r is True)
     
-    # ── 總結 ──
     log("=" * 60, "SUCCESS")
-    log(f"搶位結束！成功搶到 {len(completed_dates)}/{len(parking_dates)} 個日期", "SUCCESS")
+    log(f"搶位結束！成功 {success_count}/{len(parking_dates)} 個日期", "SUCCESS")
     if completed_dates:
         log(f"成功日期: {', '.join(completed_dates)}", "SUCCESS")
     log("=" * 60, "SUCCESS")
@@ -1003,22 +1029,11 @@ def main() -> None:
         help="強制無頭模式（背景執行，不顯示瀏覽器視窗）",
     )
     parser.add_argument(
-        "--colab",
-        action="store_true",
-        help="Colab 模式：停用 GUI 輸入並套用 Colab 瀏覽器參數",
-    )
-    parser.add_argument(
         "--non-interactive",
         action="store_true",
         help="非互動模式：僅從環境變數讀取帳密，缺少時直接結束",
     )
     args = parser.parse_args()
-
-    detected_colab = is_colab_runtime()
-    CONFIG["colab_mode"] = bool(args.colab or detected_colab)
-    if CONFIG["colab_mode"]:
-        CONFIG["headless"] = True
-        log("偵測到 Colab 執行環境，已啟用 Colab 模式（預設 headless）", "INFO")
 
     # ── 取得帳號密碼 ──
     ask_credentials(non_interactive=args.non_interactive)
